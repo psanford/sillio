@@ -25,10 +25,23 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	connectDone := make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(30 * time.Second):
+			log.Fatal("failed to connect after 30 seconds")
+		case <-connectDone:
+
+		}
+	}()
+
 	err = m.Connect()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	close(connectDone)
 
 	log.Printf("Read Messages")
 	msgs, err := m.ReadMessages()
