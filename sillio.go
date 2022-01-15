@@ -17,6 +17,8 @@ var modem = flag.String("modem", "/dev/ttyUSB1", "Modem device")
 var postURL = flag.String("url", "", "URL to post messages to")
 var username = flag.String("username", "", "Username")
 var password = flag.String("password", "", "Username")
+var slackToken = flag.String("slack-token", "", "Slack bot token")
+var slackChannelID = flag.String("slack-channel", "", "Slack channel id")
 
 func main() {
 
@@ -36,6 +38,12 @@ func main() {
 		}
 	}()
 
+	s := &server{
+		modem:      m,
+		inboundMsg: make(chan gogsm.Msg, 100),
+	}
+	s.initCMDS()
+
 	err = m.Connect()
 	if err != nil {
 		log.Fatal(err)
@@ -54,12 +62,19 @@ func main() {
 			continue
 		}
 		fmt.Printf("msg: %+v\n", msg)
-		err := sendMsg(msg)
+		err := s.sendMsg(msg)
 		if err != nil {
 			log.Fatalf("send msg err: %s", err)
 		}
 
 		m.DeleteMsg(msg.Index)
+	}
+
+	if *slackToken != "" && *slackChannelID != "" {
+		log.Printf("starting slack worker")
+		go s.runSlack()
+	} else {
+		log.Printf("slack integration disabled")
 	}
 
 	log.Printf("Subscribe Msgs")
@@ -70,7 +85,7 @@ func main() {
 
 	for evt := range ch {
 		fmt.Printf("Got %+v\n", evt)
-		err = sendMsg(evt.Msg)
+		err = s.sendMsg(evt.Msg)
 		if err != nil {
 			log.Fatalf("send msg err: %s", err)
 		}
@@ -79,12 +94,23 @@ func main() {
 	}
 }
 
-func sendMsg(msg gogsm.Msg) error {
+type server struct {
+	cmds       []cmd
+	modem      *gogsm.Modem
+	inboundMsg chan gogsm.Msg
+}
+
+func (s *server) sendMsg(msg gogsm.Msg) error {
 	pm := PostMsg{
 		From: msg.From,
 		To:   msg.To,
 		TS:   msg.TS,
 		Body: msg.Body,
+	}
+
+	select {
+	case s.inboundMsg <- msg:
+	default:
 	}
 
 	payload, err := json.Marshal(pm)

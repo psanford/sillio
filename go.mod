@@ -3,8 +3,10 @@ module github.com/psanford/sillio
 go 1.16
 
 require (
-	github.com/psanford/gogsm v0.0.0-20211206005510-d3ba901a0954 // indirect
-	github.com/warthog618/modem v0.3.0
-	golang.org/x/sys v0.0.0-20211205182925-97ca703d548d // indirect
-	k8s.io/utils v0.0.0-20210527160623-6fdb442a123b
+	github.com/nyaruka/phonenumbers v1.0.74
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/psanford/gogsm v0.0.0-20220115041337-39649ef44251
+	github.com/retailnext/unixtime v0.0.0-20171004230528-01070448a2fe
+	github.com/slack-go/slack v0.10.1
+	golang.org/x/sys v0.0.0-20220114195835-da31bd327af9 // indirect
 )
