@@ -53,8 +53,9 @@ func (s *server) smsCMD(c cmdInfo) {
 	}
 
 	num := phonenumbers.Format(parsed, phonenumbers.E164)
+	num = strings.TrimPrefix(num, "+")
 
-	err = s.modem.SendSMS(num, msg)
+	err = s.SendSMS(num, msg)
 	if err != nil {
 		log.Printf("Send sms err: %s", err)
 		c.respond(fmt.Sprintf("Send sms err: %s", err))
