@@ -27,6 +27,7 @@ func main() {
 	s := &server{
 		inboundMsg:  make(chan PostMsg, 100),
 		outboundMsg: make(chan OutboundMsg),
+		slackLogMsg: make(chan string, 100),
 	}
 	s.initCMDS()
 	go s.runSlack()
@@ -41,6 +42,7 @@ func main() {
 type server struct {
 	cmds        []cmd
 	inboundMsg  chan PostMsg
+	slackLogMsg chan string
 	outboundMsg chan OutboundMsg
 }
 
@@ -49,11 +51,6 @@ func (s *server) run() {
 	if err != nil {
 		log.Fatal(err.Error())
 	}
-	version, err := mmgr.GetVersion()
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-	fmt.Println("ModemManager Version: ", version)
 	modems, err := mmgr.GetModems()
 	if err != nil {
 		log.Fatalf("Get modems err: %s", err)
@@ -83,8 +80,8 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 		j, _ := sms.MarshalJSON()
 		pdu, _ := sms.GetPduType()
 		if pdu != modemmanager.MmSmsPduTypeSubmit {
-			fmt.Println("msg", string(j), err)
-			fmt.Println("========================================")
+			log.Println("msg", string(j), err)
+			log.Println("========================================")
 			msg := PostMsg{
 				From: num,
 				TS:   ts,
@@ -95,9 +92,51 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 		mm.Delete(sms)
 	}
 
+	ownNumbers, _ := modem.GetOwnNumbers()
+
+	ticker := time.NewTicker(1 * time.Minute)
+	var lastHealthCheckSent time.Time
+	pendingHealthChecks := make(map[string]time.Time)
+
 	c := mm.SubscribeAdded()
 	for {
 		select {
+		case <-ticker.C:
+			if len(ownNumbers) < 1 {
+				log.Fatalf("Could not determine our own number")
+			}
+			if len(pendingHealthChecks) > 0 {
+				for k, ts := range pendingHealthChecks {
+					if time.Since(ts) > 2*time.Minute {
+						msg := fmt.Sprintf("Health check failed for %s ts=%s", k, ts)
+						s.logMsgToSlack(msg)
+						log.Printf(msg)
+						go func() {
+							// wait a bit for our post to slack to happen, then exit
+							time.Sleep(10 * time.Second)
+							log.Fatalf("Exiting, health check failed for %s ts=%s", k, ts)
+						}()
+					}
+				}
+			}
+
+			if time.Since(lastHealthCheckSent) < 30*time.Minute {
+				continue
+			}
+
+			ts := time.Now()
+			text := fmt.Sprintf("sillio health check %d", ts.UnixNano())
+			pendingHealthChecks[text] = ts
+			msg, err := mm.CreateSms(ownNumbers[0], text)
+			if err != nil {
+				log.Fatalf("create health check sms err: %s", err)
+			}
+
+			err = msg.Send()
+			if err != nil {
+				log.Fatalf("send health check sms err: %s", err)
+			}
+			lastHealthCheckSent = ts
 		case msg := <-s.outboundMsg:
 			reply, err := mm.CreateSms(msg.To, msg.Body)
 			if err != nil {
@@ -115,7 +154,7 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 			mm.Delete(reply)
 			msg.Result <- nil
 		case added := <-c:
-			fmt.Printf("got sms: %+v\n", added)
+			log.Printf("got sms: %+v\n", added)
 			sms, recieved, err := mm.ParseAdded(added)
 			if err != nil {
 				log.Fatalf("failed to parse sms: %s", err)
@@ -127,9 +166,16 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 			txt, _ := sms.GetText()
 			ts, _ := sms.GetTimestamp()
 			j, _ := sms.MarshalJSON()
-			fmt.Println("msg", string(j), err)
-			fmt.Println("========================================")
+			log.Println("msg", string(j), err)
+			log.Println("========================================")
 			mm.Delete(sms)
+
+			if _, found := pendingHealthChecks[txt]; found {
+				delete(pendingHealthChecks, txt)
+				log.Printf("Health check ok")
+				continue
+			}
+
 			msg := PostMsg{
 				From: num,
 				TS:   ts,
@@ -168,6 +214,13 @@ func (s *server) forwardMsg(msg PostMsg) error {
 	}
 
 	return nil
+}
+
+func (s *server) logMsgToSlack(msg string) {
+	select {
+	case s.slackLogMsg <- msg:
+	default:
+	}
 }
 
 func (s *server) SendSMS(to string, body string) error {

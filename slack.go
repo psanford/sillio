@@ -108,6 +108,8 @@ func (s *server) runSlack() {
 
 	for {
 		select {
+		case msg := <-s.slackLogMsg:
+			rtm.SendMessage(rtm.NewOutgoingMessage(msg, *slackChannelID))
 		case smsMsg := <-s.inboundMsg:
 			msg := fmt.Sprintf("From:%s\nTS:%s\n%s\n", smsMsg.From, smsMsg.TS.Format(time.RFC3339), smsMsg.Body)
 			rtm.SendMessage(rtm.NewOutgoingMessage(msg, *slackChannelID))
