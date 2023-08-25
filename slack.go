@@ -112,7 +112,24 @@ func (s *server) runSlack() {
 			rtm.SendMessage(rtm.NewOutgoingMessage(msg, *slackChannelID))
 		case smsMsg := <-s.inboundMsg:
 			msg := fmt.Sprintf("From:%s\nTS:%s\n%s\n", smsMsg.From, smsMsg.TS.Format(time.RFC3339), smsMsg.Body)
-			rtm.SendMessage(rtm.NewOutgoingMessage(msg, *slackChannelID))
+			outgoing := rtm.NewOutgoingMessage(msg, *slackChannelID)
+			rtm.SendMessage(outgoing)
+
+			for _, part := range smsMsg.Attachments {
+				name := part.Name
+				if name == "" {
+					name = "_blank_"
+				}
+				_, err := api.UploadFile(slack.FileUploadParameters{
+					Filename: part.Name,
+					Content:  string(part.Data),
+					Channels: []string{*slackChannelID},
+				})
+				if err != nil {
+					log.Printf("upload file %s err: %s", part.Name, err)
+				}
+			}
+
 		case msg := <-rtm.IncomingEvents:
 			switch ev := msg.Data.(type) {
 			case *slack.HelloEvent:

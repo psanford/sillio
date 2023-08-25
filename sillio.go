@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -143,12 +144,43 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 			ts, _ := sms.GetTimestamp()
 			data, _ := sms.GetData()
 
+			var attachments []Attachment
+
 			if len(data) > 0 {
 				packet, err := wap.UnmarshalPushNotification(data)
 				if err != nil {
 					log.Printf("decode wap message err: %s", err)
 				}
+
+				log.Printf("parsed WAP-Push msg: %+v", packet)
 				num = packet.Header[mms.From].String()
+
+				contentLocation := packet.Header[mms.ContentLocation]
+				if contentLocation.String() != "" {
+					msg, err := s.fetchMMS(contentLocation.String())
+					if err != nil {
+						log.Printf("fetch mms err: %s", err)
+					} else {
+						log.Printf("mms msg header: %+v", msg.Header)
+						for _, part := range msg.Parts {
+							if part.ContentType == "text/plain" {
+								txt = txt + string(part.Data)
+							} else {
+								name := part.FileName
+								if name == "" {
+									name = part.Header["Name"]
+								}
+
+								attachments = append(attachments, Attachment{
+									ContentType: part.ContentType,
+									Name:        name,
+									Data:        part.Data,
+								})
+							}
+
+						}
+					}
+				}
 			}
 
 			log.Println("msg", string(j))
@@ -162,9 +194,10 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 			}
 
 			msg := PostMsg{
-				From: num,
-				TS:   ts,
-				Body: txt,
+				From:        num,
+				TS:          ts,
+				Body:        txt,
+				Attachments: attachments,
 			}
 			s.forwardMsg(msg)
 		}
@@ -201,6 +234,19 @@ func (s *server) forwardMsg(msg PostMsg) error {
 	return nil
 }
 
+func (s *server) fetchMMS(url string) (*mms.Message, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("fetch MMS %s err: %w", url, err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("fetch MMS read body %s err: %w", url, err)
+	}
+
+	return mms.Unmarshal(body)
+}
+
 func (s *server) logMsgToSlack(msg string) {
 	select {
 	case s.slackLogMsg <- msg:
@@ -220,10 +266,17 @@ func (s *server) SendSMS(to string, body string) error {
 }
 
 type PostMsg struct {
-	From string    `json:"from"`
-	To   string    `json:"to"`
-	TS   time.Time `json:"ts"`
-	Body string    `json:"body"`
+	From        string       `json:"from"`
+	To          string       `json:"to"`
+	TS          time.Time    `json:"ts"`
+	Body        string       `json:"body"`
+	Attachments []Attachment `json:"attachment"`
+}
+
+type Attachment struct {
+	Name        string `json:"name"`
+	ContentType string `json:"content_type"`
+	Data        []byte `json:"data"`
 }
 
 type OutboundMsg struct {
