@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/maltegrosse/go-modemmanager"
+	"github.com/psanford/gsm/mms"
+	"github.com/psanford/gsm/wap"
 )
 
 var postURL = flag.String("url", "", "URL to post messages to")
@@ -79,8 +81,9 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 		ts, _ := sms.GetTimestamp()
 		j, _ := sms.MarshalJSON()
 		pdu, _ := sms.GetPduType()
+		log.Println("init raw msg", string(j))
 		if pdu != modemmanager.MmSmsPduTypeSubmit {
-			log.Println("msg", string(j), err)
+			log.Println("msg", string(j))
 			log.Println("========================================")
 			msg := PostMsg{
 				From: num,
@@ -93,51 +96,19 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 	}
 
 	ownNumbers, _ := modem.GetOwnNumbers()
+	log.Printf("own numbers: %+v\n", ownNumbers)
 
 	ticker := time.NewTicker(1 * time.Minute)
-	var lastHealthCheckSent time.Time
 	pendingHealthChecks := make(map[string]time.Time)
 
 	c := mm.SubscribeAdded()
 	for {
+		log.Printf("subscribe loop")
 		select {
 		case <-ticker.C:
-			if len(ownNumbers) < 1 {
-				log.Fatalf("Could not determine our own number")
-			}
-			if len(pendingHealthChecks) > 0 {
-				for k, ts := range pendingHealthChecks {
-					if time.Since(ts) > 2*time.Minute {
-						msg := fmt.Sprintf("Health check failed for %s ts=%s", k, ts)
-						s.logMsgToSlack(msg)
-						log.Printf(msg)
-						go func() {
-							// wait a bit for our post to slack to happen, then exit
-							time.Sleep(10 * time.Second)
-							log.Fatalf("Exiting, health check failed for %s ts=%s", k, ts)
-						}()
-					}
-				}
-			}
-
-			if time.Since(lastHealthCheckSent) < 30*time.Minute {
-				continue
-			}
-
-			ts := time.Now()
-			text := fmt.Sprintf("sillio health check %d", ts.UnixNano())
-			pendingHealthChecks[text] = ts
-			msg, err := mm.CreateSms(ownNumbers[0], text)
-			if err != nil {
-				log.Fatalf("create health check sms err: %s", err)
-			}
-
-			err = msg.Send()
-			if err != nil {
-				log.Fatalf("send health check sms err: %s", err)
-			}
-			lastHealthCheckSent = ts
+			// todo and some health checks here
 		case msg := <-s.outboundMsg:
+			log.Printf("outbound msg")
 			reply, err := mm.CreateSms(msg.To, msg.Body)
 			if err != nil {
 				log.Printf("create sms err: %s", err)
@@ -154,19 +125,33 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 			mm.Delete(reply)
 			msg.Result <- nil
 		case added := <-c:
-			log.Printf("got sms: %+v\n", added)
+			log.Printf("got inbound sms: %+v\n", added)
 			sms, recieved, err := mm.ParseAdded(added)
 			if err != nil {
 				log.Fatalf("failed to parse sms: %s", err)
 			}
+			j, err := sms.MarshalJSON()
+			if err != nil {
+				log.Printf("sms marshal json err: %s", err)
+			}
 			if !recieved {
+				log.Printf("outbound msg (skip without delete): %+v %s", sms, string(j))
 				continue
 			}
 			num, _ := sms.GetNumber()
 			txt, _ := sms.GetText()
 			ts, _ := sms.GetTimestamp()
-			j, _ := sms.MarshalJSON()
-			log.Println("msg", string(j), err)
+			data, _ := sms.GetData()
+
+			if len(data) > 0 {
+				packet, err := wap.UnmarshalPushNotification(data)
+				if err != nil {
+					log.Printf("decode wap message err: %s", err)
+				}
+				num = packet.Header[mms.From].String()
+			}
+
+			log.Println("msg", string(j))
 			log.Println("========================================")
 			mm.Delete(sms)
 
