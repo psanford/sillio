@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,7 +10,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -99,15 +103,35 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 	ownNumbers, _ := modem.GetOwnNumbers()
 	log.Printf("own numbers: %+v\n", ownNumbers)
 
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(5 * time.Minute)
 	pendingHealthChecks := make(map[string]time.Time)
+
+	pingPath, err := exec.LookPath("ping")
+	if err != nil {
+		log.Printf("failed to find ping in path, disabling health check")
+	}
+
+	logDir := s.logDir()
+	if logDir != "" {
+		os.MkdirAll(logDir, 0700)
+	}
 
 	c := mm.SubscribeAdded()
 	for {
 		log.Printf("subscribe loop")
 		select {
 		case <-ticker.C:
-			// todo and some health checks here
+			if pingPath != "" {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					err = exec.CommandContext(ctx, pingPath, "-I", "wwp0s19u1u3i12", "-c", "2", "8.8.8.8").Run()
+					if err != nil {
+						log.Printf("health check ping err: %s", err)
+					}
+				}()
+			}
+
 		case msg := <-s.outboundMsg:
 			log.Printf("outbound msg")
 			reply, err := mm.CreateSms(msg.To, msg.Body)
@@ -134,6 +158,12 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 			j, err := sms.MarshalJSON()
 			if err != nil {
 				log.Printf("sms marshal json err: %s", err)
+			} else {
+				if logDir != "" {
+					ts := time.Now().UnixMilli()
+					p := filepath.Join(logDir, fmt.Sprintf("sms.%d", ts))
+					os.WriteFile(p, j, 0600)
+				}
 			}
 			if !recieved {
 				log.Printf("outbound msg (skip without delete): %+v %s", sms, string(j))
@@ -145,6 +175,7 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 			data, _ := sms.GetData()
 
 			var attachments []Attachment
+			var tos []string
 
 			if len(data) > 0 {
 				packet, err := wap.UnmarshalPushNotification(data)
@@ -153,11 +184,25 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 				}
 
 				log.Printf("parsed WAP-Push msg: %+v", packet)
-				num = packet.Header[mms.From].String()
+				if from := packet.Header.Get(mms.From.String()); from != "" {
+					num = from
+				}
+				for _, to := range packet.Header[mms.To.String()] {
+					tos = append(tos, to)
+				}
 
-				contentLocation := packet.Header[mms.ContentLocation]
-				if contentLocation.String() != "" {
-					msg, err := s.fetchMMS(contentLocation.String())
+				contentLocation := packet.Header.Get(mms.ContentLocation.String())
+				if contentLocation != "" {
+					msg, rawBody, err := s.fetchMMS(contentLocation)
+					if rawBody != nil {
+						if logDir != "" {
+							ts := time.Now().UnixMilli()
+							safeLoc := strings.ReplaceAll(contentLocation, "/", "_")
+							p := filepath.Join(logDir, fmt.Sprintf("mms.%d.%s", ts, filepath.Clean(safeLoc)))
+							log.Printf("log to %s", p)
+							os.WriteFile(p, rawBody, 0600)
+						}
+					}
 					if err != nil {
 						log.Printf("fetch mms err: %s", err)
 					} else {
@@ -177,7 +222,6 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 									Data:        part.Data,
 								})
 							}
-
 						}
 					}
 				}
@@ -196,6 +240,8 @@ func (s *server) listenSMS(modem modemmanager.Modem) {
 			msg := PostMsg{
 				From:        num,
 				TS:          ts,
+				To:          strings.Join(tos, ", "),
+				Tos:         tos,
 				Body:        txt,
 				Attachments: attachments,
 			}
@@ -234,17 +280,18 @@ func (s *server) forwardMsg(msg PostMsg) error {
 	return nil
 }
 
-func (s *server) fetchMMS(url string) (*mms.Message, error) {
+func (s *server) fetchMMS(url string) (*mms.Message, []byte, error) {
 	resp, err := http.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("fetch MMS %s err: %w", url, err)
+		return nil, nil, fmt.Errorf("fetch MMS %s err: %w", url, err)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("fetch MMS read body %s err: %w", url, err)
+		return nil, nil, fmt.Errorf("fetch MMS read body %s err: %w", url, err)
 	}
 
-	return mms.Unmarshal(body)
+	msg, err := mms.Unmarshal(body)
+	return msg, body, err
 }
 
 func (s *server) logMsgToSlack(msg string) {
@@ -265,9 +312,18 @@ func (s *server) SendSMS(to string, body string) error {
 	return err
 }
 
+func (s *server) logDir() string {
+	homeDir := os.Getenv("HOME")
+	if homeDir == "" {
+		return ""
+	}
+	return filepath.Join(homeDir, ".cache/sillio")
+}
+
 type PostMsg struct {
 	From        string       `json:"from"`
 	To          string       `json:"to"`
+	Tos         []string     `json:"tos"`
 	TS          time.Time    `json:"ts"`
 	Body        string       `json:"body"`
 	Attachments []Attachment `json:"attachment"`
